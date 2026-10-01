@@ -1,0 +1,6 @@
+anthropic
+python-docx
+pillow
+pypdf
+tkinterdnd2
+pyinstaller

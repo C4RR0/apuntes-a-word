@@ -1,0 +1,29 @@
+name: App para Mac
+on: [push, workflow_dispatch]
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: macos-14   # Apple Silicon (M1/M2/M3/M4)
+            nombre: Apple-Silicon
+          - os: macos-15-intel   # Intel
+            nombre: Intel
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - run: pyinstaller --noconfirm --windowed --name "Apuntes a Word" --collect-all tkinterdnd2 apuntes_a_word.py
+      - name: Comprobar que la app arranca sin errores
+        run: |
+          "dist/Apuntes a Word.app/Contents/MacOS/Apuntes a Word" & PID=$!
+          sleep 15
+          if kill -0 $PID 2>/dev/null; then echo "ARRANCA OK"; kill $PID; else wait $PID; echo "LA APP SE CERRÓ AL ARRANCAR"; exit 1; fi
+      - run: cd dist && ditto -c -k --keepParent "Apuntes a Word.app" "Apuntes-a-Word-Mac-${{ matrix.nombre }}.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Apuntes-a-Word-Mac-${{ matrix.nombre }}
+          path: dist/Apuntes-a-Word-Mac-${{ matrix.nombre }}.zip
