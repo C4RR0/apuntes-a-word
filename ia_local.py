@@ -20,6 +20,7 @@ import platform
 import random
 import re
 import shutil
+import ssl
 import socket
 import subprocess
 import sys
@@ -87,6 +88,16 @@ def plataforma_llama():
     return "ubuntu-x64.tar.gz"
 
 
+def contexto_ssl():
+    """Certificados de certifi: el Python que va dentro de la app de Mac no ve los
+    del sistema y sin esto da CERTIFICATE_VERIFY_FAILED al descargar."""
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        return ssl.create_default_context()
+
+
 def descargar(url, destino, tamaño, log, nombre):
     """Descarga con reanudación (si se corta, sigue donde iba) y comprobación del tamaño."""
     destino = Path(destino)
@@ -99,7 +110,7 @@ def descargar(url, destino, tamaño, log, nombre):
         if hecho:
             peticion.add_header("Range", f"bytes={hecho}-")
         try:
-            with urllib.request.urlopen(peticion, timeout=60) as r:
+            with urllib.request.urlopen(peticion, timeout=60, context=contexto_ssl()) as r:
                 if hecho and r.status != 206:   # el servidor no reanuda: empezar de cero
                     hecho = 0
                 total = tamaño or (hecho + int(r.headers.get("Content-Length", 0)))
