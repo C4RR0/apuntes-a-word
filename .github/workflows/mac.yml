@@ -3,6 +3,7 @@ on: [push, workflow_dispatch]
 jobs:
   build:
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: macos-14   # Apple Silicon (M1/M2/M3/M4)
@@ -16,12 +17,35 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -r requirements.txt
-      - run: pyinstaller --noconfirm --windowed --name "Apuntes a Word" --collect-all tkinterdnd2 apuntes_a_word.py
+      - run: pyinstaller --noconfirm --windowed --name "Apuntes a Word" --collect-all tkinterdnd2 --collect-all pypdfium2 --collect-all pypdfium2_raw apuntes_a_word.py
       - name: Comprobar que la app arranca sin errores
         run: |
           "dist/Apuntes a Word.app/Contents/MacOS/Apuntes a Word" & PID=$!
           sleep 15
-          if kill -0 $PID 2>/dev/null; then echo "ARRANCA OK"; kill $PID; else wait $PID; echo "LA APP SE CERR” AL ARRANCAR"; exit 1; fi
+          if kill -0 $PID 2>/dev/null; then echo "ARRANCA OK"; kill $PID; else wait $PID; echo "LA APP SE CERRO AL ARRANCAR"; exit 1; fi
+      - name: Prueba completa con la IA local (modelo peque√±o)
+        env:
+          APUNTES_IA: prueba
+          APUNTES_MODELO_PRUEBA: "Qwen3.5-0.8B-GGUF|Qwen3.5-0.8B-Q4_K_M.gguf|mmproj-F16.gguf"
+        run: |
+          pip install fpdf2
+          python - <<'EOF'
+          from fpdf import FPDF
+          pdf = FPDF(orientation="L")
+          pdf.set_font("Helvetica", size=22)
+          for titulo, lineas in [("PLACENTA", []),
+                                 ("Placenta previa", ["- Insercion en el segmento inferior del utero", "- Riesgo: hemorragia en el tercer trimestre"]),
+                                 ("Cordon umbilical", ["- Dos arterias y una vena", "- Longitud media: 50-60 cm"])]:
+              pdf.add_page()
+              pdf.cell(0, 20, titulo, new_x="LMARGIN", new_y="NEXT")
+              for l in lineas:
+                  pdf.cell(0, 14, l, new_x="LMARGIN", new_y="NEXT")
+          pdf.output("prueba.pdf")
+          EOF
+          mkdir salida
+          "dist/Apuntes a Word.app/Contents/MacOS/Apuntes a Word" --consola prueba.pdf salida
+          ls -la salida
+          test -n "$(ls salida/*.docx)" && echo "IA LOCAL OK: Word creado en Mac"
       - run: cd dist && ditto -c -k --keepParent "Apuntes a Word.app" "Apuntes-a-Word-Mac-${{ matrix.nombre }}.zip"
       - uses: actions/upload-artifact@v4
         with:

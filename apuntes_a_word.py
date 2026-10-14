@@ -8,7 +8,9 @@ Por cada PDF (o por todos juntos) genera un .docx con:
   - Preguntas tipo test (con soluciones explicadas al final)
   - Fichas de repaso (pregunta / respuesta)
 
-Una segunda pasada de revisión compara el texto con el PDF y completa lo que falte.
+Por defecto usa una IA gratis que funciona en el propio ordenador sin internet (ia_local.py,
+Gemma 4 con llama.cpp); se puede elegir Claude (de pago) en la interfaz.
+Siempre se comprueba el texto contra el PDF y se completa lo que falte.
 """
 
 import base64
@@ -29,6 +31,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 
 import anthropic
+import pypdfium2 as pdfium
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_BREAK, WD_COLOR_INDEX
 from docx.oxml import OxmlElement
@@ -36,6 +39,8 @@ from docx.oxml.ns import qn
 from docx.shared import Cm, Pt, RGBColor
 from PIL import Image
 from pypdf import PdfReader, PdfWriter
+
+import ia_local
 
 try:
     from tkinterdnd2 import DND_FILES, TkinterDnD
@@ -705,9 +710,23 @@ def leer_pdf(ruta):
     return datos, lector
 
 
-def procesar(rutas, carpeta, opciones, api_key, log, unir=False):
-    """Procesa los PDFs. Devuelve (lista de Word creados, coste en US$)."""
+def procesar(rutas, carpeta, opciones, api_key, log, unir=False, ia=None):
+    """Procesa los PDFs. Devuelve (lista de Word creados, coste en US$).
+
+    ia: "maxima" o "rapida" = IA gratis en este ordenador (sin internet); "claude" = Claude de pago.
+    """
+    ia = ia or ia_local.modelo_recomendado()
+    if ia != "claude":
+        log(f"IA gratis en este ordenador: {ia_local.MODELOS[ia][0]}")
+        servidor, modelo, vision = ia_local.preparar(CONFIG_DIR / "ia", ia, log)
+        log("   Arrancando la IA...")
+        with ia_local.Motor(servidor, modelo, vision, log) as motor:
+            return _procesar(rutas, carpeta, opciones, log, unir, motor=motor)
     cliente = anthropic.Anthropic(api_key=api_key, max_retries=5)
+    return _procesar(rutas, carpeta, opciones, log, unir, cliente=cliente)
+
+
+def _procesar(rutas, carpeta, opciones, log, unir, cliente=None, motor=None):
     contador = Contador()
     grupos = [rutas] if unir and len(rutas) > 1 else [[r] for r in rutas]
     creados = []
@@ -720,7 +739,11 @@ def procesar(rutas, carpeta, opciones, api_key, log, unir=False):
             datos, lector = leer_pdf(ruta)
             imagenes = extraer_imagenes(lector) if opciones["imagenes"] else {}
             log(f"   {len(lector.pages)} páginas, {len(imagenes)} imágenes útiles")
-            md =pasar_a_limpio(cliente, datos, lector, imagenes, opciones["revisar"], contador, log)
+            if motor:
+                md = renumerar(ia_local.pasar_a_limpio_local(
+                    motor, lector, pdfium.PdfDocument(datos), imagenes, log, titulo_doc=nombre))
+            else:
+                md = pasar_a_limpio(cliente, datos, lector, imagenes, opciones["revisar"], contador, log)
             if len(grupo) > 1:
                 sufijo = f"_{len(partes) + 1}"
                 md = MARCA_IMG.sub(lambda m: f"[[{m.group(1)}{sufijo}|{m.group(2) or ''}]]", md)
@@ -731,7 +754,11 @@ def procesar(rutas, carpeta, opciones, api_key, log, unir=False):
         estudio = ""
         if any(opciones[k] for k in ("resumen", "esquema", "test", "fichas")):
             log("   Creando resumen, esquema, test y fichas...")
-            estudio = material_estudio(cliente, "\n\n".join(md for _, md in partes), opciones, contador)
+            todo = "\n\n".join(md for _, md in partes)
+            if motor:
+                estudio = ia_local.material_estudio_local(motor, todo, opciones, log)
+            else:
+                estudio = material_estudio(cliente, todo, opciones, contador)
         if not opciones["limpio"]:
             partes = [(n, "") for n, _ in partes]
         titulo = Path(grupo[0]).stem if len(grupo) == 1 else f"Apuntes: {Path(grupo[0]).stem} y {len(grupo) - 1} más"
@@ -808,6 +835,18 @@ class App:
         ttk.Entry(fila2, textvariable=self.carpeta).pack(side="left", fill="x", expand=True, padx=6)
         ttk.Button(fila2, text="Cambiar...", command=self.elegir_carpeta).pack(side="left")
 
+        fila_ia = ttk.Frame(marco)
+        fila_ia.pack(fill="x", pady=(8, 0))
+        ttk.Label(fila_ia, text="IA:").pack(side="left")
+        recomendada = ia_local.modelo_recomendado()
+        self.nombres_ia = {clave: f"Gratis, sin internet · {nombre}" + (" (recomendada)" if clave == recomendada else "")
+                           for clave, (nombre, *_) in ia_local.MODELOS.items()}
+        self.nombres_ia["claude"] = "Claude (de pago, necesita clave e internet)"
+        guardada = self.cfg.get("ia") if self.cfg.get("ia") in self.nombres_ia else recomendada
+        self.ia = tk.StringVar(value=self.nombres_ia[guardada])
+        ttk.Combobox(fila_ia, textvariable=self.ia, values=list(self.nombres_ia.values()), state="readonly",
+                     width=58).pack(side="left", padx=6)
+
         fila3 = ttk.Frame(marco)
         fila3.pack(fill="x", pady=10)
         self.btn = ttk.Button(fila3, text="✨ Crear Word", command=self.empezar)
@@ -827,8 +866,9 @@ class App:
                 w.dnd_bind("<<Drop>>", self.soltar)
 
         self.añadir(pdfs_iniciales)
-        if not self.cfg.get("api_key"):
-            raiz.after(300, self.pedir_clave)
+
+    def ia_elegida(self):
+        return next(k for k, v in self.nombres_ia.items() if v == self.ia.get())
 
     # ---- lista de PDFs
     def añadir(self, rutas):
@@ -892,7 +932,8 @@ class App:
         if not self.pdfs:
             messagebox.showinfo("Apuntes a Word", "Primero añade al menos un PDF.")
             return
-        if not self.cfg.get("api_key"):
+        ia = self.ia_elegida()
+        if ia == "claude" and not self.cfg.get("api_key"):
             self.pedir_clave()
             return
         opciones = {k: v.get() for k, v in self.vars.items()}
@@ -906,20 +947,25 @@ class App:
             messagebox.showerror("Apuntes a Word", "No puedo usar esa carpeta. Elige otra.")
             return
         self.cfg.update(opciones=opciones, carpeta_salida=carpeta, unir=self.unir.get(),
-                        abrir=self.abrir_al_final.get())
+                        abrir=self.abrir_al_final.get(), ia=ia)
         guardar_config(self.cfg)
 
         self.btn.config(state="disabled")
         self.progreso.start(12)
-        minutos = 5 if opciones["revisar"] else 3
-        self.log(f"Empiezo. Cuenta unos {minutos} minutos por PDF; puedes dejarlo trabajando.")
-        threading.Thread(target=self.trabajar, args=(list(self.pdfs), carpeta, opciones, self.unir.get()),
+        if ia == "claude":
+            minutos = 5 if opciones["revisar"] else 3
+            self.log(f"Empiezo. Cuenta unos {minutos} minutos por PDF; puedes dejarlo trabajando.")
+        else:
+            self.log("Empiezo. La IA gratis trabaja en tu ordenador: lee cada diapositiva y comprueba que no "
+                     "falte nada, así que tarda más (de media hora a varias horas según el tema y el "
+                     "ordenador). Puedes dejarlo trabajando; no hace falta internet.")
+        threading.Thread(target=self.trabajar, args=(list(self.pdfs), carpeta, opciones, self.unir.get(), ia),
                          daemon=True).start()
 
-    def trabajar(self, pdfs, carpeta, opciones, unir):
+    def trabajar(self, pdfs, carpeta, opciones, unir, ia):
         creados, coste = [], 0.0
         try:
-            creados, coste = procesar(pdfs, carpeta, opciones, self.cfg["api_key"], self.log, unir)
+            creados, coste = procesar(pdfs, carpeta, opciones, self.cfg.get("api_key"), self.log, unir, ia)
         except anthropic.AuthenticationError:
             self.log("✖ La clave de la IA no es válida. Revísala en ⚙ Clave de la IA.")
         except anthropic.PermissionDeniedError:
@@ -943,7 +989,10 @@ class App:
         self.btn.config(state="normal")
         if not creados:
             return
-        self.log(f"Listo: {len(creados)} Word creado(s). Coste aproximado: {coste:.2f} US$".replace(".", ","))
+        if coste:
+            self.log(f"Listo: {len(creados)} Word creado(s). Coste aproximado: {coste:.2f} US$".replace(".", ","))
+        else:
+            self.log(f"Listo: {len(creados)} Word creado(s). Coste: 0 € (IA gratis en tu ordenador).")
         if self.abrir_al_final.get():
             for ruta in creados:
                 abrir(ruta)
@@ -956,10 +1005,11 @@ def main():
     # modo consola para pruebas: apuntes_a_word.py --consola archivo.pdf [carpeta_salida]
     if args and args[0] == "--consola":
         cfg = cargar_config()
+        # IA: variable APUNTES_IA = maxima | rapida | claude (por defecto, la recomendada para el equipo)
         clave = limpiar_clave(os.environ.get("ANTHROPIC_API_KEY") or cfg.get("api_key"))
         opciones = {k: True for k, _ in App.OPCIONES}
         salida = args[2] if len(args) > 2 else carpeta_descargas()
-        creados, coste = procesar([args[1]], salida, opciones, clave, print)
+        creados, coste = procesar([args[1]], salida, opciones, clave, print, ia=os.environ.get("APUNTES_IA"))
         print(f"Coste aproximado: {coste:.2f} US$")
         return
     raiz = TkinterDnD.Tk() if TkinterDnD is not None else tk.Tk()

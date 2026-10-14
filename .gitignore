@@ -4,3 +4,4 @@ __pycache__/
 prueba_real/
 *.docx
 *.pdf
+_local/
