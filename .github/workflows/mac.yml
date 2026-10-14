@@ -17,7 +17,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -r requirements.txt
-      - run: pyinstaller --noconfirm --windowed --name "Apuntes a Word" --collect-all tkinterdnd2 --collect-all pypdfium2 --collect-all pypdfium2_raw apuntes_a_word.py
+      - run: pyinstaller --noconfirm --windowed --name "Apuntes a Word" --collect-all tkinterdnd2 --collect-all pypdfium2 --collect-all pypdfium2_raw --collect-all docx apuntes_a_word.py
       - name: Comprobar que la app arranca sin errores
         run: |
           "dist/Apuntes a Word.app/Contents/MacOS/Apuntes a Word" & PID=$!

@@ -827,4 +827,4 @@ def material_estudio_local(motor, apuntes_md, opciones, log):
         secciones.append(f"## Preguntas tipo test\n{cuerpo}\n\n### Soluciones\n{soluciones}")
     if fichas:
         secciones.append("## Fichas de repaso\n" + "\n\n".join(f"**P:** {p}\n**R:** {r}" for p, r in fichas))
-    return "\n\n".join(secciones)
+    return sin_latex("\n\n".join(secciones))
