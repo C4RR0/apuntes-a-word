@@ -11,6 +11,7 @@ jobs:
           - os: macos-15-intel   # Intel
             nombre: Intel
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -26,6 +27,7 @@ jobs:
       - name: Prueba completa con la IA local (modelo pequeño)
         env:
           APUNTES_IA: prueba
+          APUNTES_MAX_TOKENS: "300"
           APUNTES_MODELO_PRUEBA: "Qwen3.5-0.8B-GGUF|Qwen3.5-0.8B-Q4_K_M.gguf|mmproj-F16.gguf"
         run: |
           pip install fpdf2

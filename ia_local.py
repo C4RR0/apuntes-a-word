@@ -226,6 +226,8 @@ class Motor:
         if sistema:
             mensajes.append({"role": "system", "content": sistema})
         mensajes.append({"role": "user", "content": contenido})
+        if os.environ.get("APUNTES_MAX_TOKENS"):   # solo en la prueba automática, para que sea rápida
+            max_tokens = min(max_tokens, int(os.environ["APUNTES_MAX_TOKENS"]))
         cuerpo = {"messages": mensajes, "max_tokens": max_tokens, "temperature": temperatura,
                   "top_p": 0.95, "repeat_penalty": 1.05,
                   "chat_template_kwargs": {"enable_thinking": pensar}}
