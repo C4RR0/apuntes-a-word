@@ -1,5 +1,6 @@
 name: App para Mac
-on: [push, workflow_dispatch]
+# Solo a mano: los runners de Mac gastan los minutos gratis de Actions x10 (repo privado).
+on: workflow_dispatch
 jobs:
   build:
     strategy:
