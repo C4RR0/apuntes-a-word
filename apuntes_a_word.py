@@ -1006,6 +1006,11 @@ def main():
     if args and args[0] == "--consola":
         cfg = cargar_config()
         # IA: variable APUNTES_IA = maxima | rapida | claude (por defecto, la recomendada para el equipo)
+        for flujo in (sys.stdout, sys.stderr):
+            try:
+                flujo.reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
         clave = limpiar_clave(os.environ.get("ANTHROPIC_API_KEY") or cfg.get("api_key"))
         opciones = {k: True for k, _ in App.OPCIONES}
         salida = args[2] if len(args) > 2 else carpeta_descargas()
