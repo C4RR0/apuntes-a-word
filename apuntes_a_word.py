@@ -839,7 +839,10 @@ class App:
         fila_ia.pack(fill="x", pady=(8, 0))
         ttk.Label(fila_ia, text="IA:").pack(side="left")
         recomendada = ia_local.modelo_recomendado()
-        self.nombres_ia = {clave: f"Gratis, sin internet · {nombre}" + (" (recomendada)" if clave == recomendada else "")
+        # 15/10: «Máxima» en un PC donde no cabe en la gráfica tardaba más de 3 horas por tema.
+        lenta = " (muy lenta en este ordenador: horas)" if recomendada == "rapida" else ""
+        self.nombres_ia = {clave: f"Gratis, sin internet · {nombre}"
+                           + (" (recomendada)" if clave == recomendada else lenta if clave == "maxima" else "")
                            for clave, (nombre, *_) in ia_local.MODELOS.items()}
         self.nombres_ia["claude"] = "Claude (de pago, necesita clave e internet)"
         guardada = self.cfg.get("ia") if self.cfg.get("ia") in self.nombres_ia else recomendada

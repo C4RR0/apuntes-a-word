@@ -191,23 +191,33 @@ class Motor:
             self.puerto = s.getsockname()[1]
         self.log = log
         self.registro = open(Path(modelo).parent / "motor.log", "w", encoding="utf-8", errors="replace")
+        base = [str(servidor), "-m", str(modelo), "--mmproj", str(vision), "--host", "127.0.0.1",
+                "--port", str(self.puerto), "-c", str(CONTEXTO), "-np", "1", "--jinja", "--no-webui"]
+        # 15/10: memoria de trabajo de la IA en 8 bits (la mitad que en 16): en un Mac de 16 GB o una
+        # gráfica de 6 GB cabe más modelo en la memoria rápida. Si en algún equipo no arranca así,
+        # se vuelve a la configuración de antes.
+        comprimida = ["-fa", "on", "-ctk", "q8_0", "-ctv", "q8_0"]
+        atexit.register(self.cerrar)   # si se cierra la ventana a medias, la IA no se queda encendida
+        if not self._arrancar(base + comprimida, servidor):
+            self.registro.write("\n--- no arrancó con la memoria comprimida; se reintenta sin ella ---\n")
+            if not self._arrancar(base, servidor):
+                raise RuntimeError("La IA no ha podido arrancar (¿falta memoria? Prueba la opción «Rápida»). "
+                                   f"Detalles en {self.registro.name}")
+
+    def _arrancar(self, orden, servidor):
         opciones = {}
         if sys.platform == "win32":
             opciones["creationflags"] = 0x08000000   # sin ventana negra
-        self.proceso = subprocess.Popen(
-            [str(servidor), "-m", str(modelo), "--mmproj", str(vision), "--host", "127.0.0.1",
-             "--port", str(self.puerto), "-c", str(CONTEXTO), "-np", "1", "--jinja", "--no-webui"],
-            stdout=self.registro, stderr=subprocess.STDOUT, cwd=str(Path(servidor).parent), **opciones)
-        atexit.register(self.cerrar)   # si se cierra la ventana a medias, la IA no se queda encendida
+        self.proceso = subprocess.Popen(orden, stdout=self.registro, stderr=subprocess.STDOUT,
+                                        cwd=str(Path(servidor).parent), **opciones)
         inicio = time.time()
         while True:
             if self.proceso.poll() is not None:
-                raise RuntimeError("La IA no ha podido arrancar (¿falta memoria? Prueba la opción «Rápida»). "
-                                   f"Detalles en {self.registro.name}")
+                return False
             try:
                 with urllib.request.urlopen(f"http://127.0.0.1:{self.puerto}/health", timeout=5) as r:
                     if json.load(r).get("status") == "ok":
-                        break
+                        return True
             except Exception:
                 pass
             if time.time() - inicio > 600:
@@ -688,6 +698,51 @@ def _lineas_con(original, olvidos):
     return lineas
 
 
+def _clave_titulo(t):
+    return " ".join(sorted(raices(t)))
+
+
+def fusionar_anadidos(texto, anadidos, original):
+    """Mete los añadidos ("#### Subapartado" + líneas) al final de su subapartado en el texto.
+    Un subapartado que no estaba se coloca en el orden de los apuntes originales."""
+    def secciones(md):
+        res = [[None, []]]
+        for l in md.splitlines():
+            m = re.match(r"^#{2,4}\s+(.+)$", l)
+            if m:
+                res.append([m.group(1).strip(), [l]])
+            else:
+                res[-1][1].append(l)
+        return res
+
+    def parecido(a, b):
+        ra, rb = set(raices(a)), set(raices(b))
+        return bool(ra and rb) and len(ra & rb) / min(len(ra), len(rb)) >= 0.6
+
+    actuales = secciones(texto)
+    orden_original = [t.strip() for t in re.findall(r"(?m)^#{3,4}\s+(.+)$", original)]
+
+    def puesto(titulo):   # posición del subapartado en los apuntes originales
+        return next((i for i, t in enumerate(orden_original) if parecido(t, titulo)), len(orden_original))
+
+    for titulo, lineas in secciones(anadidos):
+        cuerpo = [l for l in lineas if not re.match(r"^#{2,4}\s", l) and l.strip()]
+        if not cuerpo:
+            continue
+        destino = next((s for s in actuales if s[0] and titulo and parecido(s[0], titulo)), None)
+        if destino:
+            while destino[1] and not destino[1][-1].strip():
+                destino[1].pop()
+            destino[1].extend(cuerpo)
+        elif titulo:   # subapartado nuevo: antes del primero que en los apuntes va detrás de él
+            p = puesto(titulo)
+            i = next((k for k, s in enumerate(actuales) if s[0] and puesto(s[0]) > p), len(actuales))
+            actuales.insert(i, [titulo, [f"#### {titulo}"] + cuerpo])
+        else:
+            actuales[-1][1].extend(cuerpo)
+    return "\n".join(l for _, lineas in actuales for l in lineas).strip()
+
+
 def resumen_local(motor, titulo, md, tipo):
     if tipo == "resumen":
         orden = ("Escribe el RESUMEN de este apartado para estudiar.\n"
@@ -712,13 +767,16 @@ def resumen_local(motor, titulo, md, tipo):
     texto = ordenar_markdown(motor.pedir(prompt, SISTEMA, max_tokens=4000))
     olvidos = _olvidos(md, texto, con_cifras=(tipo == "resumen"))
     if olvidos:
+        # 15/10: antes se pedía el apartado COMPLETO otra vez (otras 1.000-1.500 palabras de IA, la
+        # mitad del tiempo de esta fase). Ahora solo lo que falta, y el programa lo encaja en su sitio.
         nombres = {"subapartado": "el subapartado", "concepto": "el concepto", "cifra": "la cifra"}
         arreglo = (prompt + "\n\nYa lo habías escrito así:\n<borrador>\n" + texto + "\n</borrador>\n\n"
                    "Pero te has dejado esto:\n" + "\n".join(f"- {nombres[t]} «{x}»" for t, x in olvidos)
-                   + "\n\nDevuélvelo COMPLETO incluyendo cada uno en su sitio, con el mismo formato.")
-        nuevo = ordenar_markdown(motor.pedir(arreglo, SISTEMA, max_tokens=4500))
-        if len(nuevo) >= len(texto) * 0.9:
-            texto = nuevo
+                   + "\n\nEscribe SOLO lo que falta (no repitas nada del borrador), con el mismo formato. "
+                   "Pon cada añadido debajo del título del subapartado donde va, copiando ese título tal "
+                   "cual en una línea «#### Título». Si falta un subapartado entero, escríbelo completo "
+                   "con su título.")
+        texto = fusionar_anadidos(texto, ordenar_markdown(motor.pedir(arreglo, SISTEMA, max_tokens=1500)), md)
         if tipo == "resumen":   # garantía final: lo que siga faltando se añade desde los apuntes
             restantes = _lineas_con(md, _olvidos(md, texto))
             if restantes:
