@@ -40,6 +40,7 @@ from docx.shared import Cm, Pt, RGBColor
 from PIL import Image
 from pypdf import PdfReader, PdfWriter
 
+import ia_gemini
 import ia_local
 
 try:
@@ -195,20 +196,28 @@ def extraer_imagenes(lector):
     return resultado
 
 
-def trocear_pdf(datos, lector):
-    """Lista de (pdf_bytes, página_inicio, página_fin)."""
+def trocear_pdf(datos, lector, max_bytes=MAX_BYTES_TROZO):
+    """Lista de (pdf_bytes, página_inicio, página_fin). Un trozo que pese más de max_bytes se
+    parte en dos (Gemini admite unos 20 MB por petición)."""
     total = len(lector.pages)
-    if total <= PAGINAS_POR_TROZO and len(datos) <= MAX_BYTES_TROZO:
+    if total <= PAGINAS_POR_TROZO and len(datos) <= max_bytes:
         return [(datos, 1, total)]
-    trozos = []
-    for inicio in range(0, total, PAGINAS_POR_TROZO):
-        fin = min(inicio + PAGINAS_POR_TROZO, total)
+
+    def trozo(inicio, fin):
         escritor = PdfWriter()
         for i in range(inicio, fin):
             escritor.add_page(lector.pages[i])
         buf = io.BytesIO()
         escritor.write(buf)
-        trozos.append((buf.getvalue(), inicio + 1, fin))
+        pdf = buf.getvalue()
+        if len(pdf) > max_bytes and fin - inicio > 1:
+            mitad = (inicio + fin) // 2
+            return trozo(inicio, mitad) + trozo(mitad, fin)
+        return [(pdf, inicio + 1, fin)]
+
+    trozos = []
+    for inicio in range(0, total, PAGINAS_POR_TROZO):
+        trozos += trozo(inicio, min(inicio + PAGINAS_POR_TROZO, total))
     return trozos
 
 
@@ -228,6 +237,7 @@ def texto_imagenes(imagenes, ini, fin):
 class Contador:
     def __init__(self):
         self.coste = 0.0
+        self.modelos = set()   # modelos de Gemini usados (para el registro)
         self.cerrojo = threading.Lock()
 
     def sumar(self, u):
@@ -243,6 +253,12 @@ class Contador:
 
 def pedir(cliente, contenido, contador):
     """Una petición en streaming (salidas largas) con respaldo automático si el modelo rechaza."""
+    if isinstance(cliente, ia_gemini.Cliente):   # mismo contenido, traducido al formato de Gemini
+        partes = [{"inline_data": {"mime_type": "application/pdf", "data": b["source"]["data"]}}
+                  if b["type"] == "document" else {"text": b["text"]} for b in contenido]
+        texto, modelo = cliente.generar(partes, SISTEMA)
+        contador.modelos.add(modelo)
+        return re.sub(r"^```(?:markdown)?\s*|\s*```$", "", texto)
     with cliente.beta.messages.stream(
         model=MODELO,
         max_tokens=64000,
@@ -280,7 +296,8 @@ def renumerar(md, nivel="##"):
 
 
 def pasar_a_limpio(cliente, datos, lector, imagenes, revisar, contador, log):
-    trozos = trocear_pdf(datos, lector)
+    gemini = isinstance(cliente, ia_gemini.Cliente)
+    trozos = trocear_pdf(datos, lector, max_bytes=14 * 1024 * 1024 if gemini else MAX_BYTES_TROZO)
 
     def un_trozo(trozo):
         pdf, ini, fin = trozo
@@ -710,12 +727,18 @@ def leer_pdf(ruta):
     return datos, lector
 
 
-def procesar(rutas, carpeta, opciones, api_key, log, unir=False, ia=None):
+def procesar(rutas, carpeta, opciones, api_key, log, unir=False, ia=None, clave_gemini=None):
     """Procesa los PDFs. Devuelve (lista de Word creados, coste en US$).
 
-    ia: "maxima" o "rapida" = IA gratis en este ordenador (sin internet); "claude" = Claude de pago.
+    ia: "maxima" o "rapida" = IA gratis en este ordenador (sin internet); "claude" = Claude de pago;
+    "gemini" = Gemini de Google (gratis, necesita internet y clave de aistudio.google.com).
     """
     ia = ia or ia_local.modelo_recomendado()
+    if ia == "gemini":
+        log("IA: Gemini de Google (gratis, por internet)")
+        cliente = ia_gemini.Cliente(clave_gemini, log)
+        log(f"   Modelo: {cliente.modelos()[0]}")
+        return _procesar(rutas, carpeta, opciones, log, unir, cliente=cliente)
     if ia != "claude":
         log(f"IA gratis en este ordenador: {ia_local.MODELOS[ia][0]}")
         servidor, modelo, vision = ia_local.preparar(CONFIG_DIR / "ia", ia, log)
@@ -844,8 +867,11 @@ class App:
         self.nombres_ia = {clave: f"Gratis, sin internet · {nombre}"
                            + (" (recomendada)" if clave == recomendada else lenta if clave == "maxima" else "")
                            for clave, (nombre, *_) in ia_local.MODELOS.items()}
+        # 15/10: Gemini gratis por internet = calidad de primera y rápido en cualquier ordenador.
+        self.nombres_ia = {"gemini": "Gratis, con internet · Gemini de Google (la mejor gratis, rápida)",
+                           **self.nombres_ia}
         self.nombres_ia["claude"] = "Claude (de pago, necesita clave e internet)"
-        guardada = self.cfg.get("ia") if self.cfg.get("ia") in self.nombres_ia else recomendada
+        guardada = self.cfg.get("ia") if self.cfg.get("ia") in self.nombres_ia else "gemini"
         self.ia = tk.StringVar(value=self.nombres_ia[guardada])
         ttk.Combobox(fila_ia, textvariable=self.ia, values=list(self.nombres_ia.values()), state="readonly",
                      width=58).pack(side="left", padx=6)
@@ -930,6 +956,32 @@ class App:
 
         ttk.Button(f, text="Guardar", command=guardar).pack(anchor="e")
 
+    def pedir_clave_gemini(self):
+        ventana = tk.Toplevel(self.raiz)
+        ventana.title("Clave gratis de Google (Gemini)")
+        ventana.transient(self.raiz)
+        ventana.grab_set()
+        f = ttk.Frame(ventana, padding=14)
+        f.pack(fill="both", expand=True)
+        ttk.Label(f, justify="left", text=(
+            "Gemini es gratis, solo necesita una clave (se saca una vez, en 1 minuto):\n"
+            "  1. Entra en aistudio.google.com/apikey con tu cuenta de Google.\n"
+            "  2. Pulsa «Create API key» (Crear clave de API).\n"
+            "  3. Copia la clave (empieza por AIza) y pégala aquí debajo.")).pack(anchor="w")
+        ttk.Button(f, text="Abrir la página de la clave",
+                   command=lambda: abrir("https://aistudio.google.com/apikey")).pack(anchor="w", pady=(8, 0))
+        v = tk.StringVar(value=self.cfg.get("gemini_key", ""))
+        e = ttk.Entry(f, textvariable=v, width=60, show="•")
+        e.pack(fill="x", pady=8)
+        e.focus()
+
+        def guardar():
+            self.cfg["gemini_key"] = ia_gemini.limpiar_clave(v.get())
+            guardar_config(self.cfg)
+            ventana.destroy()
+
+        ttk.Button(f, text="Guardar", command=guardar).pack(anchor="e")
+
     # ---- proceso
     def empezar(self):
         if not self.pdfs:
@@ -938,6 +990,9 @@ class App:
         ia = self.ia_elegida()
         if ia == "claude" and not self.cfg.get("api_key"):
             self.pedir_clave()
+            return
+        if ia == "gemini" and not self.cfg.get("gemini_key"):
+            self.pedir_clave_gemini()
             return
         opciones = {k: v.get() for k, v in self.vars.items()}
         if not any(opciones[k] for k in ("limpio", "resumen", "esquema", "test", "fichas")):
@@ -958,6 +1013,8 @@ class App:
         if ia == "claude":
             minutos = 5 if opciones["revisar"] else 3
             self.log(f"Empiezo. Cuenta unos {minutos} minutos por PDF; puedes dejarlo trabajando.")
+        elif ia == "gemini":
+            self.log("Empiezo con Gemini (gratis). Cuenta de 5 a 15 minutos por PDF; puedes dejarlo trabajando.")
         else:
             self.log("Empiezo. La IA gratis trabaja en tu ordenador: lee cada diapositiva y comprueba que no "
                      "falte nada, así que tarda más (de media hora a varias horas según el tema y el "
@@ -968,7 +1025,12 @@ class App:
     def trabajar(self, pdfs, carpeta, opciones, unir, ia):
         creados, coste = [], 0.0
         try:
-            creados, coste = procesar(pdfs, carpeta, opciones, self.cfg.get("api_key"), self.log, unir, ia)
+            creados, coste = procesar(pdfs, carpeta, opciones, self.cfg.get("api_key"), self.log, unir, ia,
+                                      clave_gemini=self.cfg.get("gemini_key"))
+        except ia_gemini.ClaveInvalida:
+            self.cfg.pop("gemini_key", None)
+            guardar_config(self.cfg)
+            self.log("✖ La clave de Google no es válida. Vuelve a darle a «Crear Word» y pega una nueva.")
         except anthropic.AuthenticationError:
             self.log("✖ La clave de la IA no es válida. Revísala en ⚙ Clave de la IA.")
         except anthropic.PermissionDeniedError:
@@ -995,7 +1057,7 @@ class App:
         if coste:
             self.log(f"Listo: {len(creados)} Word creado(s). Coste aproximado: {coste:.2f} US$".replace(".", ","))
         else:
-            self.log(f"Listo: {len(creados)} Word creado(s). Coste: 0 € (IA gratis en tu ordenador).")
+            self.log(f"Listo: {len(creados)} Word creado(s). Coste: 0 €.")
         if self.abrir_al_final.get():
             for ruta in creados:
                 abrir(ruta)
@@ -1008,7 +1070,7 @@ def main():
     # modo consola para pruebas: apuntes_a_word.py --consola archivo.pdf [carpeta_salida]
     if args and args[0] == "--consola":
         cfg = cargar_config()
-        # IA: variable APUNTES_IA = maxima | rapida | claude (por defecto, la recomendada para el equipo)
+        # IA: variable APUNTES_IA = gemini | maxima | rapida | claude (por defecto, la recomendada para el equipo)
         for flujo in (sys.stdout, sys.stderr):
             try:
                 flujo.reconfigure(encoding="utf-8", errors="replace")
@@ -1017,7 +1079,8 @@ def main():
         clave = limpiar_clave(os.environ.get("ANTHROPIC_API_KEY") or cfg.get("api_key"))
         opciones = {k: True for k, _ in App.OPCIONES}
         salida = args[2] if len(args) > 2 else carpeta_descargas()
-        creados, coste = procesar([args[1]], salida, opciones, clave, print, ia=os.environ.get("APUNTES_IA"))
+        creados, coste = procesar([args[1]], salida, opciones, clave, print, ia=os.environ.get("APUNTES_IA"),
+                                  clave_gemini=os.environ.get("GEMINI_API_KEY") or cfg.get("gemini_key"))
         print(f"Coste aproximado: {coste:.2f} US$")
         return
     raiz = TkinterDnD.Tk() if TkinterDnD is not None else tk.Tk()
